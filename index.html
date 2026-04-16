@@ -1,0 +1,492 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Nocka Nocka 3D - Full Rules</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <style>
+        body { margin: 0; overflow: hidden; font-family: 'Helvetica Neue', Arial, sans-serif; background-color: #121212; user-select: none; }
+        #ui {
+            position: absolute;
+            top: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            text-align: center;
+            color: white;
+            pointer-events: none;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.8);
+            z-index: 10;
+        }
+        #turn-indicator {
+            font-size: 24px;
+            font-weight: bold;
+            padding: 12px 24px;
+            border-radius: 40px;
+            background: rgba(0, 0, 0, 0.7);
+            display: inline-block;
+            margin-bottom: 10px;
+            pointer-events: auto;
+            border: 1px solid rgba(255,255,255,0.2);
+        }
+        .player-1 { color: #ffffff; border-bottom: 4px solid #ffffff; }
+        .player-2 { color: #ff4444; border-bottom: 4px solid #ff4444; }
+        
+        #controls-ui {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            z-index: 20;
+        }
+
+        #message-box {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background: rgba(0,0,0,0.95);
+            color: white;
+            padding: 40px 60px;
+            border-radius: 20px;
+            text-align: center;
+            display: none;
+            z-index: 100;
+            pointer-events: auto;
+            border: 2px solid #777;
+            box-shadow: 0 0 30px rgba(0,0,0,0.5);
+        }
+        #winner-text { font-size: 32px; margin-bottom: 20px; }
+        
+        button {
+            padding: 12px 24px;
+            font-size: 16px;
+            cursor: pointer;
+            background: #333;
+            color: white;
+            border: 1px solid #555;
+            border-radius: 8px;
+            transition: all 0.2s;
+        }
+        button:hover { background: #555; transform: scale(1.05); }
+        
+        #instructions {
+            position: absolute;
+            bottom: 20px;
+            left: 20px;
+            color: rgba(255,255,255,0.8);
+            font-size: 13px;
+            background: rgba(0,0,0,0.6);
+            padding: 15px;
+            border-radius: 10px;
+            pointer-events: none;
+            line-height: 1.5;
+        }
+        .highlight-text { color: #ffcc00; font-weight: bold; }
+    </style>
+</head>
+<body>
+
+<div id="ui">
+    <div id="turn-indicator" class="player-1">プレイヤー 1 の番 (白)</div>
+</div>
+
+<div id="controls-ui">
+    <button onclick="resetCamera()">カメラリセット</button>
+</div>
+
+<div id="message-box">
+    <h2 id="winner-text">勝利！</h2>
+    <p id="win-reason" style="margin-bottom: 20px; color: #ccc;"></p>
+    <button onclick="resetGame()">もう一度プレイ</button>
+</div>
+
+<div id="instructions">
+    <span class="highlight-text">操作:</span> 左クリックで選択・移動 / 右クリックドラッグでカメラ回転 / ホイールでズーム<br>
+    <span class="highlight-text">ルール:</span> 8方向に1マス移動。<span class="highlight-text">自他の駒の上</span>に最大3段まで積める。<br>
+    <span class="highlight-text">勝利:</span> ゴール列到達か、<span class="highlight-text">相手の全駒を下敷き</span>にする。
+</div>
+
+<script>
+    /**
+     * 盤面構成 (神視点):
+     * Row 0: Player 2 のゴール列
+     * Row 1: Player 1 初期位置
+     * Row 2-5: フィールド
+     * Row 6: Player 2 初期位置
+     * Row 7: Player 1 のゴール列
+     */
+    const ROWS = 8; 
+    const COLS = 5;
+    const TILE_SIZE = 2;
+    const PIECE_RADIUS = 0.75;
+    const PIECE_HEIGHT = 0.45;
+    const STACK_OFFSET = 0.5;
+
+    let scene, camera, renderer;
+    let board = []; 
+    let pieces = [];
+    let currentTurn = 1; 
+    let selectedPiece = null;
+    let validMoves = [];
+    let isGameOver = false;
+
+    // カメラ
+    let isRightDragging = false;
+    let previousMousePosition = { x: 0, y: 0 };
+    let cameraAzimuth = Math.PI / 2; 
+    let cameraElevation = Math.PI / 5; 
+    let cameraDistance = 25;
+    const defaultCameraSettings = { azimuth: Math.PI / 2, elevation: Math.PI / 5, distance: 25 };
+
+    window.onload = function() {
+        init();
+        createBoard();
+        setupInitialPieces();
+        updateCameraPosition();
+        animate();
+    };
+
+    function init() {
+        scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x121212);
+
+        camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 1000);
+
+        renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.shadowMap.enabled = true;
+        document.body.appendChild(renderer.domElement);
+
+        const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
+        scene.add(ambientLight);
+
+        const spotLight = new THREE.SpotLight(0xffffff, 0.8);
+        spotLight.position.set(10, 30, 10);
+        spotLight.castShadow = true;
+        scene.add(spotLight);
+
+        window.addEventListener('mousedown', onMouseDown, false);
+        window.addEventListener('mousemove', onMouseMove, false);
+        window.addEventListener('mouseup', onMouseUp, false);
+        window.addEventListener('wheel', onWheel, { passive: false });
+        window.addEventListener('resize', onWindowResize, false);
+        window.addEventListener('contextmenu', e => e.preventDefault(), false);
+    }
+
+    function createBoard() {
+        const boardGroup = new THREE.Group();
+        for (let r = 0; r < ROWS; r++) {
+            board[r] = [];
+            for (let c = 0; c < COLS; c++) {
+                board[r][c] = [];
+                
+                const geometry = new THREE.BoxGeometry(TILE_SIZE * 0.96, 0.2, TILE_SIZE * 0.96);
+                let color = (r + c) % 2 === 0 ? 0x2a2a2a : 0x333333;
+                
+                if (r === 0) color = 0x882222; // P2 Goal Area
+                if (r === 7) color = 0x222288; // P1 Goal Area
+
+                const material = new THREE.MeshPhongMaterial({ color: color });
+                const tile = new THREE.Mesh(geometry, material);
+                
+                tile.position.x = (r - (ROWS - 1) / 2) * TILE_SIZE;
+                tile.position.z = (c - (COLS - 1) / 2) * TILE_SIZE;
+                tile.position.y = -0.1;
+                tile.receiveShadow = true;
+                
+                tile.userData = { type: 'tile', row: r, col: c };
+                boardGroup.add(tile);
+            }
+        }
+        scene.add(boardGroup);
+    }
+
+    function setupInitialPieces() {
+        for (let c = 0; c < COLS; c++) createPiece(1, c, 1);
+        for (let c = 0; c < COLS; c++) createPiece(6, c, 2);
+    }
+
+    function createPiece(row, col, player) {
+        const geometry = new THREE.CylinderGeometry(PIECE_RADIUS, PIECE_RADIUS, PIECE_HEIGHT, 32);
+        const color = player === 1 ? 0xffffff : 0xff3333;
+        const material = new THREE.MeshPhongMaterial({ 
+            color: color,
+            specular: 0x666666,
+            shininess: 40
+        });
+        const mesh = new THREE.Mesh(geometry, material);
+        
+        mesh.castShadow = true;
+        mesh.userData = { type: 'piece', player: player, row: row, col: col };
+        
+        updatePieceVisualPosition(mesh, row, col, board[row][col].length);
+        board[row][col].push(mesh);
+        pieces.push(mesh);
+        scene.add(mesh);
+    }
+
+    function updatePieceVisualPosition(mesh, row, col, stackIndex) {
+        mesh.position.x = (row - (ROWS - 1) / 2) * TILE_SIZE;
+        mesh.position.z = (col - (COLS - 1) / 2) * TILE_SIZE;
+        mesh.position.y = stackIndex * STACK_OFFSET + PIECE_HEIGHT / 2;
+        mesh.userData.row = row;
+        mesh.userData.col = col;
+    }
+
+    const raycaster = new THREE.Raycaster();
+    const mouse = new THREE.Vector2();
+
+    function onMouseDown(event) {
+        if (event.button === 2) { 
+            isRightDragging = true;
+            previousMousePosition = { x: event.clientX, y: event.clientY };
+            return;
+        }
+
+        if (isGameOver || event.button !== 0) return;
+
+        mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+        mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+
+        raycaster.setFromCamera(mouse, camera);
+        const intersects = raycaster.intersectObjects(scene.children, true);
+
+        if (intersects.length > 0) {
+            let target = intersects[0].object;
+            while (target && !target.userData.type && target.parent) {
+                target = target.parent;
+            }
+
+            if (!target || !target.userData.type) {
+                clearSelection();
+                return;
+            }
+
+            const data = target.userData;
+            
+            // すでに駒が選択されている場合、クリックした先（駒またはタイル）が移動先かどうかを確認
+            if (selectedPiece) {
+                const isMoveTarget = validMoves.some(m => m.row === data.row && m.col === data.col);
+                if (isMoveTarget) {
+                    executeMove(selectedPiece, data.row, data.col);
+                    return;
+                }
+            }
+
+            // 移動先クリックでなかった場合、新規の駒選択を試みる
+            if (data.type === 'piece') {
+                handlePieceSelection(data.row, data.col);
+            } else {
+                clearSelection();
+            }
+        } else {
+            clearSelection();
+        }
+    }
+
+    function handlePieceSelection(row, col) {
+        const stack = board[row][col];
+        if (stack.length === 0) return;
+
+        const topPiece = stack[stack.length - 1];
+        
+        // 自分のターンで、かつ最上段の駒のみ選択可能
+        if (topPiece.userData.player === currentTurn) {
+            clearSelection();
+            selectedPiece = topPiece;
+            selectedPiece.material.emissive.setHex(0x444422);
+            calculateValidMoves(row, col);
+            highlightTiles(true);
+        } else {
+            clearSelection();
+        }
+    }
+
+    function calculateValidMoves(row, col) {
+        validMoves = [];
+        // 到達済みの駒は動かない
+        if (row === 0 || row === 7) return;
+
+        for (let dr = -1; dr <= 1; dr++) {
+            for (let dc = -1; dc <= 1; dc++) {
+                if (dr === 0 && dc === 0) continue;
+                
+                const nr = row + dr;
+                const nc = col + dc;
+
+                if (nr >= 0 && nr < ROWS && nc >= 0 && nc < COLS) {
+                    // ゴール列への進入制限
+                    if (nr === 0 && currentTurn === 1) continue; 
+                    if (nr === 7 && currentTurn === 2) continue;
+
+                    // 積み上げ制限 (最大3段)
+                    if (board[nr][nc].length < 3) {
+                        validMoves.push({ row: nr, col: nc });
+                    }
+                }
+            }
+        }
+    }
+
+    function executeMove(piece, nextRow, nextCol) {
+        const prevRow = piece.userData.row;
+        const prevCol = piece.userData.col;
+
+        // 元の位置から抜く
+        board[prevRow][prevCol].pop();
+
+        // 新しい位置へ追加
+        const newStackIndex = board[nextRow][nextCol].length;
+        board[nextRow][nextCol].push(piece);
+
+        // 位置の更新
+        updatePieceVisualPosition(piece, nextRow, nextCol, newStackIndex);
+
+        // 勝利・敗北判定
+        if (!checkGameStatus(piece, nextRow, nextCol)) {
+            switchTurn();
+            clearSelection();
+        }
+    }
+
+    function checkGameStatus(movedPiece, row, col) {
+        const player = movedPiece.userData.player;
+        
+        // 1. ゴール到達判定
+        if (player === 1 && row === 7) {
+            endGame(1, "ゴールエリアに到達しました！");
+            return true;
+        }
+        if (player === 2 && row === 0) {
+            endGame(2, "ゴールエリアに到達しました！");
+            return true;
+        }
+
+        // 2. 敗北判定 (次のプレイヤーが動かせる駒を一つでも持っているか)
+        const nextPlayer = player === 1 ? 2 : 1;
+        let topPiecesCount = 0;
+
+        for (let r = 0; r < ROWS; r++) {
+            for (let c = 0; c < COLS; c++) {
+                const stack = board[r][c];
+                if (stack.length > 0) {
+                    const top = stack[stack.length - 1];
+                    if (top.userData.player === nextPlayer) {
+                        // ゴール以外の場所に、自分が一番上にいる駒があるか
+                        if (r !== 0 && r !== 7) {
+                            topPiecesCount++;
+                        }
+                    }
+                }
+            }
+        }
+
+        if (topPiecesCount === 0) {
+            endGame(player, `プレイヤー ${nextPlayer} の全ての駒が下敷きになりました！`);
+            return true;
+        }
+
+        return false;
+    }
+
+    function switchTurn() {
+        currentTurn = currentTurn === 1 ? 2 : 1;
+        const indicator = document.getElementById('turn-indicator');
+        indicator.className = `player-${currentTurn}`;
+        indicator.textContent = `プレイヤー ${currentTurn} の番 (${currentTurn === 1 ? '白' : '赤'})`;
+    }
+
+    function clearSelection() {
+        if (selectedPiece) selectedPiece.material.emissive.setHex(0x000000);
+        highlightTiles(false);
+        selectedPiece = null;
+        validMoves = [];
+    }
+
+    function highlightTiles(show) {
+        scene.traverse(obj => {
+            if (obj.userData && obj.userData.type === 'tile') {
+                const isTarget = validMoves.some(m => m.row === obj.userData.row && m.col === obj.userData.col);
+                if (show && isTarget) {
+                    obj.material.emissive.setHex(0x222211);
+                } else {
+                    obj.material.emissive.setHex(0x000000);
+                }
+            }
+        });
+    }
+
+    function endGame(winner, reason) {
+        isGameOver = true;
+        const msgBox = document.getElementById('message-box');
+        const winText = document.getElementById('winner-text');
+        const reasonText = document.getElementById('win-reason');
+        
+        winText.textContent = `プレイヤー ${winner} の勝利！`;
+        winText.style.color = winner === 1 ? '#ffffff' : '#ff4444';
+        reasonText.textContent = reason;
+        msgBox.style.display = 'block';
+    }
+
+    function resetGame() {
+        pieces.forEach(p => scene.remove(p));
+        pieces = [];
+        for (let r = 0; r < ROWS; r++) {
+            for (let c = 0; c < COLS; c++) board[r][c] = [];
+        }
+        setupInitialPieces();
+        currentTurn = 1;
+        isGameOver = false;
+        document.getElementById('turn-indicator').className = `player-1`;
+        document.getElementById('turn-indicator').textContent = `プレイヤー 1 の番 (白)`;
+        document.getElementById('message-box').style.display = 'none';
+        clearSelection();
+    }
+
+    function onMouseMove(event) {
+        if (isRightDragging) {
+            const deltaX = event.clientX - previousMousePosition.x;
+            const deltaY = event.clientY - previousMousePosition.y;
+            cameraAzimuth -= deltaX * 0.01;
+            cameraElevation += deltaY * 0.01;
+            cameraElevation = Math.max(0.05, Math.min(Math.PI / 2 - 0.05, cameraElevation));
+            updateCameraPosition();
+            previousMousePosition = { x: event.clientX, y: event.clientY };
+        }
+    }
+    function onMouseUp(event) { if (event.button === 2) isRightDragging = false; }
+    function onWheel(event) {
+        event.preventDefault();
+        cameraDistance += event.deltaY * 0.02;
+        cameraDistance = Math.max(10, Math.min(60, cameraDistance));
+        updateCameraPosition();
+    }
+    function updateCameraPosition() {
+        camera.position.x = cameraDistance * Math.sin(cameraElevation) * Math.cos(cameraAzimuth);
+        camera.position.y = cameraDistance * Math.cos(cameraElevation);
+        camera.position.z = cameraDistance * Math.sin(cameraElevation) * Math.sin(cameraAzimuth);
+        camera.lookAt(0, 0, 0);
+    }
+    function resetCamera() {
+        cameraAzimuth = defaultCameraSettings.azimuth;
+        cameraElevation = defaultCameraSettings.elevation;
+        cameraDistance = defaultCameraSettings.distance;
+        updateCameraPosition();
+    }
+    function onWindowResize() {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+    }
+
+    function animate() {
+        requestAnimationFrame(animate);
+        if (selectedPiece && !isGameOver) {
+            const time = Date.now() * 0.01;
+            selectedPiece.position.y = (board[selectedPiece.userData.row][selectedPiece.userData.col].length - 1) * STACK_OFFSET + PIECE_HEIGHT/2 + Math.sin(time) * 0.1;
+        }
+        renderer.render(scene, camera);
+    }
+</script>
+</body>
+</html>
